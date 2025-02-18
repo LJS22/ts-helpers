@@ -2,12 +2,20 @@
 type Prettify<TObj> = {
     [TKey in keyof TObj]: TObj[TKey];
 } & {};
-type PartialProperty<T, K extends keyof T> = Prettify<Omit<T, K> & Partial<Pick<T, K>>>;
+type PartialProperty<TObj, K extends keyof TObj> = Prettify<Omit<TObj, K> & Partial<Pick<TObj, K>>>;
+
+// EventMap holds all the events the WS can handle and the respective data types we expect to receive within the callback
+type EventMap = {
+    connect: void;
+    disconnect: { reason: string };
+    error: { message: string, code: number };
+    message: unknown;
+}
 
 // Types consumed by EventListenerElement
 type EventListenerSchema = {
-    addEventListener(action: string, callback: EventListenerOrEventListenerObject): void;
-    removeEventListener(action: string, callback: EventListenerOrEventListenerObject): void;
+    addEventListener<TData>(action: string, callback: (data: TData) => void): void;
+    removeEventListener<TData>(action: string, callback: (data: TData) => void): void;
     dispatchEvent(event: Event): void;
 }
 
@@ -19,12 +27,12 @@ class EventListenerElement implements EventListenerSchema {
         this.element = document.createElement('customWebSocket');
     }
 
-    addEventListener(action: string, callback: EventListenerOrEventListenerObject) {
-        this.element.addEventListener(action, callback);
+    addEventListener<TData>(action: string, callback: (data: TData) => void) {
+        this.element.addEventListener(action, callback as EventListenerOrEventListenerObject);
     }
 
-    removeEventListener(action: string, callback: EventListenerOrEventListenerObject) {
-        this.element.removeEventListener(action, callback);
+    removeEventListener<TData>(action: string, callback: (data: TData) => void) {
+        this.element.removeEventListener(action, callback as EventListenerOrEventListenerObject);
     }
 
     dispatchEvent(event: Event) {
@@ -34,38 +42,49 @@ class EventListenerElement implements EventListenerSchema {
 
 // Types consumed by ListenerRegistry
 type ListenerRegistrySchema = {
-    set(listenerID: string, listener: Listener): void;
-    get(listenerID: string): Listener | undefined;
-    getListenersAndLength: () => readonly [MapIterator<[string, Listener]>, number];
+    set(listenerID: string, listener: Listener<keyof EventMap>): void;
+    get(listenerID: string): Listener<keyof EventMap> | undefined;
     delete(listenerID: string): boolean;
+    getListenersAndLength(): readonly [MapIterator<[string, Listener<keyof EventMap>]>, number];
 }
-type Listener = {
-    action: string;
-    callback: EventListenerOrEventListenerObject;
-}
+type Listener<TKey extends keyof EventMap> = {
+    action: TKey;
+    callback: (data: EventMap[TKey]) => void;
+};
 
 // ListenerRegistry stores all custom event listeners we have registered, mapped to a listenerID
+// Listeners are stored as generic types and cast back to their respective type when accessed
 class ListenerRegistry implements ListenerRegistrySchema {
-    private listeners: Map<string, Listener>;
+    private listeners: Map<string, { action: keyof EventMap; callback: (data: unknown) => void }>;
 
     constructor() {
         this.listeners = new Map();
     }
 
-    set(listenerID: string, listener: Listener) {
-        this.listeners.set(listenerID, listener);
+    set<TKey extends keyof EventMap>(listenerID: string, listener: Listener<TKey>) {
+        this.listeners.set(listenerID, {
+            action: listener.action,
+            callback: listener.callback as (data: unknown) => void
+        });
     }
 
-    get(listenerID: string): Listener | undefined {
-        return this.listeners.get(listenerID);
-    }
-
-    getListenersAndLength() {
-      return [this.listeners.entries(), this.listeners.size] as const;
+    get<TKey extends keyof EventMap>(listenerID: string): Listener<TKey> | undefined {
+        const entry = this.listeners.get(listenerID);
+        if (entry) {
+            return {
+                action: entry.action as TKey,
+                callback: entry.callback as (data: EventMap[TKey]) => void
+            };
+        }
+        return undefined;
     }
 
     delete(listenerID: string): boolean {
         return this.listeners.delete(listenerID);
+    }
+
+    getListenersAndLength() {
+      return [this.listeners.entries(), this.listeners.size] as const;
     }
 }
 
@@ -87,7 +106,19 @@ type ListenerConfigType = {
   listenerRegistry: ListenerRegistry;
   eventListenerElement: EventListenerElement
 }
+type ConfigMapping = {
+    websocket: WebSocketConfig,
+    keepAlive: KeepAliveConfig,
+    reconnection: ReconnectionConfig
+};
 
+/*
+WebsocketWrapper provides the means to interact with a WebSocket, including:
+ - adding and removing custom event listeners and callbacks
+ - sending messages up the WebSocket
+ - keep alive logic
+ - reconnect logic
+*/
 class WebsocketWrapper {
     private websocket: WebSocket;
     private websocketConfig: WebSocketConfig;
@@ -139,7 +170,7 @@ class WebsocketWrapper {
         });
 
         this.websocket.addEventListener('close', (event) => {
-            const disconnectEvent: Event = new CustomEvent('disconnect', { detail: event });
+            const disconnectEvent: CustomEvent = new CustomEvent('disconnect', { detail: event });
             eventListenerElement.dispatchEvent(disconnectEvent);
 
             clearInterval(this.keepAliveConfig.keepAliveInterval);
@@ -153,13 +184,13 @@ class WebsocketWrapper {
         });
 
         this.websocket.addEventListener('error', (event) => {
-            const errorEvent: Event = new CustomEvent('error', { detail: event });
+            const errorEvent: CustomEvent = new CustomEvent('error', { detail: event });
             eventListenerElement.dispatchEvent(errorEvent);
         });
 
         this.websocket.addEventListener('message', ({ data }) => {
             const message = JSON.parse(data);
-            const dynamicMessageEvent: Event = new CustomEvent(message.action, { detail: message.data });
+            const dynamicMessageEvent: CustomEvent = new CustomEvent(message.action, { detail: message.data });
             eventListenerElement.dispatchEvent(dynamicMessageEvent);
         });
     }
@@ -195,68 +226,60 @@ class WebsocketWrapper {
         }
     }
 
-    updateWebsocketConfig(newConfig: Partial<WebSocketConfig>, triggerReconnect: boolean = false): WebSocketConfig {
-        this.websocketConfig = { ...this.websocketConfig, ...newConfig };
+    updateConfig<K extends keyof ConfigMapping>(configType: K, newConfig: Partial<ConfigMapping[K]>, triggerReconnect: boolean = false) {
+        let updatedConfig;
+
+        switch(configType) {
+            case "websocket":
+                updatedConfig = { ...this.websocketConfig, ...newConfig };
+                this.websocketConfig = updatedConfig;
+                break;
+            case "keepAlive":
+                updatedConfig = { ...this.keepAliveConfig, ...newConfig };
+                this.keepAliveConfig = updatedConfig;
+                break;
+            case "reconnection":
+                updatedConfig = { ...this.reconnectionConfig, ...newConfig };
+                this.reconnectionConfig = updatedConfig;
+                break; 
+            default:
+                console.error(`Invalid ConfigType ${configType}`);
+                break
+        }
+
         if (triggerReconnect) {
             this.reconnect();
         }
-        return this.websocketConfig;
+
+        return updatedConfig;   
     }
 
-    updateKeepAliveConfig(newConfig: Partial<KeepAliveConfig>, triggerReconnect: boolean = false): KeepAliveConfig {
-        this.keepAliveConfig = { ...this.keepAliveConfig, ...newConfig };
-        if (triggerReconnect) {
-            this.reconnect();
-        }
-        return this.keepAliveConfig;
-    }
-
-    updateReconnectionConfig(newConfig: Partial<ReconnectionConfig>, triggerReconnect: boolean = false): ReconnectionConfig {
-        this.reconnectionConfig = { ...this.reconnectionConfig, ...newConfig };
-        if (triggerReconnect) {
-            this.reconnect();
-        }
-        return this.reconnectionConfig;
-    }
-
-    send(action: string, data?: any) {
+    send(action: string, data?: unknown) {
         if (this.websocket.readyState !== WebSocket.OPEN) {
-            console.warn(
-                `A send event for ${action} was received while WebSocket is in an incompatible readyState: ${this.websocket.readyState}`
-            );
+            console.warn(`A send event for ${action} was received while WebSocket is in an incompatible readyState: ${this.websocket.readyState}`);
             return;
         }
 
-        let messageToSend: any;
-
-        if (typeof data === 'object') {
-            messageToSend = { ...data, action: action };
-        } else {
-            messageToSend = {
-                action,
-                data,
-            };
-        }
-
-        this.websocket.send(JSON.stringify(messageToSend));
+        const message = data ? { action, data } : { action };
+        this.websocket.send(JSON.stringify(message));
     }
 
-    addListener(action: string, callback: EventListenerOrEventListenerObject): string {
+    addListener<TKey extends keyof EventMap>(action: TKey, callback: (data: EventMap[TKey]) => void) {
         const { eventListenerElement, listenerRegistry } = this.listenerConfig;
 
-        eventListenerElement.addEventListener(action, callback);
+        eventListenerElement.addEventListener<EventMap[TKey]>(action, callback);
 
-        const listenerID = "UniqueID";
+        const listenerID = `listener-${Math.random().toString(36).slice(2)}`;
 
-        listenerRegistry.set(listenerID, { action, callback });
+        listenerRegistry.set<TKey>(listenerID, { action, callback });
 
         return listenerID;
     }
 
-    removeListener(listenerID: string): boolean {
+    removeListener<TKey extends keyof EventMap>(listenerID: string) {
         const { eventListenerElement, listenerRegistry } = this.listenerConfig;
 
-        const { action, callback } = listenerRegistry.get(listenerID) || {};
+        const { action, callback } = listenerRegistry.get<TKey>(listenerID) || {};
 
         if (!action || !callback) return false;
 
