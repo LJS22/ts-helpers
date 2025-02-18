@@ -77,14 +77,14 @@ type DeepPartial<T> = Readonly<{
 // RequiredTypes generates an object type with only the required fields of TObj.
 type RequiredTypes<TObj> = {
     [TKey in keyof TObj]-?: {} extends Pick<TObj, TKey> 
-        ? never : TObj[TKey] extends Record<string, any> 
+        ? never : TObj[TKey] extends object 
             ? RequiredTypes<TObj[TKey]> : TKey
 }[keyof TObj]
 
 // OptionalTypes generates an object type with only the optional fields of TObj.
 type OptionalTypes<TObj> = {
     [TKey in keyof TObj]-?: {} extends Pick<TObj, TKey> 
-        ? TKey : TObj[TKey] extends Record<string, any> 
+        ? TKey : TObj[TKey] extends object 
             ? RequiredTypes<TObj[TKey]> : never
 }[keyof TObj]
 
