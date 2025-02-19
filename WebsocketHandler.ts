@@ -8,14 +8,14 @@ type PartialProperty<TObj, K extends keyof TObj> = Prettify<Omit<TObj, K> & Part
 type EventMap = {
     connect: void;
     disconnect: { reason: string };
-    error: { message: string, code: number };
+    error: Event;
     message: unknown;
 }
 
 // Types consumed by EventListenerElement
 type EventListenerSchema = {
-    addEventListener<TData>(action: string, callback: (data: TData) => void): void;
-    removeEventListener<TData>(action: string, callback: (data: TData) => void): void;
+    addEventListener(action: string, callback: EventListenerObject, options?: AddEventListenerOptions): void;
+    removeEventListener(action: string, callback: EventListenerObject, options?: EventListenerOptions): void;
     dispatchEvent(event: Event): void;
 }
 
@@ -27,35 +27,34 @@ class EventListenerElement implements EventListenerSchema {
         this.element = document.createElement('customWebSocket');
     }
 
-    addEventListener<TData>(action: string, callback: (data: TData) => void) {
-        this.element.addEventListener(action, callback as EventListenerOrEventListenerObject);
+    addEventListener(action: string, callback: EventListenerObject, options?: AddEventListenerOptions) {
+        this.element.addEventListener(action, callback, options);
     }
 
-    removeEventListener<TData>(action: string, callback: (data: TData) => void) {
-        this.element.removeEventListener(action, callback as EventListenerOrEventListenerObject);
+    removeEventListener(action: string, callback: EventListenerObject, options?: EventListenerOptions) {
+        this.element.removeEventListener(action, callback, options);
     }
 
-    dispatchEvent(event: Event) {
+    dispatchEvent(event: CustomEvent) {
         this.element.dispatchEvent(event);
     }
 }
 
 // Types consumed by ListenerRegistry
 type ListenerRegistrySchema = {
-    set(listenerID: string, listener: Listener<keyof EventMap>): void;
-    get(listenerID: string): Listener<keyof EventMap> | undefined;
+    set<TKey extends keyof EventMap>(listenerID: string, listener: Listener<TKey>): void;
+    get<TKey extends keyof EventMap>(listenerID: string): Listener<TKey> | undefined;
     delete(listenerID: string): boolean;
     getListenersAndLength(): readonly [MapIterator<[string, Listener<keyof EventMap>]>, number];
 }
 type Listener<TKey extends keyof EventMap> = {
     action: TKey;
-    callback: (data: EventMap[TKey]) => void;
+    callbackHandler: EventListenerObject;
 };
 
 // ListenerRegistry stores all custom event listeners we have registered, mapped to a listenerID
-// Listeners are stored as generic types and cast back to their respective type when accessed
 class ListenerRegistry implements ListenerRegistrySchema {
-    private listeners: Map<string, { action: keyof EventMap; callback: (data: unknown) => void }>;
+    private listeners: Map<string, Listener<keyof EventMap>>;
 
     constructor() {
         this.listeners = new Map();
@@ -64,7 +63,7 @@ class ListenerRegistry implements ListenerRegistrySchema {
     set<TKey extends keyof EventMap>(listenerID: string, listener: Listener<TKey>) {
         this.listeners.set(listenerID, {
             action: listener.action,
-            callback: listener.callback as (data: unknown) => void
+            callbackHandler: listener.callbackHandler
         });
     }
 
@@ -73,7 +72,7 @@ class ListenerRegistry implements ListenerRegistrySchema {
         if (entry) {
             return {
                 action: entry.action as TKey,
-                callback: entry.callback as (data: EventMap[TKey]) => void
+                callbackHandler: entry.callbackHandler
             };
         }
         return undefined;
@@ -111,6 +110,10 @@ type ConfigMapping = {
     keepAlive: KeepAliveConfig,
     reconnection: ReconnectionConfig
 };
+type IncomingMessage<TKey extends keyof EventMap> = {
+    action: TKey;
+    data: EventMap[TKey];
+}
 
 /*
 WebsocketWrapper provides the means to interact with a WebSocket, including:
@@ -158,7 +161,7 @@ class WebsocketWrapper {
         const { eventListenerElement } = this.listenerConfig;
 
         this.websocket.addEventListener('open', () => {
-            const connectedEvent: Event = new Event('connect');
+            const connectedEvent = new CustomEvent('connect', {});
             eventListenerElement.dispatchEvent(connectedEvent);
 
             const { shouldSendKeepAlive, keepAliveIntervalTimeMs } = this.keepAliveConfig;
@@ -170,7 +173,7 @@ class WebsocketWrapper {
         });
 
         this.websocket.addEventListener('close', (event) => {
-            const disconnectEvent: CustomEvent = new CustomEvent('disconnect', { detail: event });
+            const disconnectEvent = new CustomEvent('disconnect', { detail: event });
             eventListenerElement.dispatchEvent(disconnectEvent);
 
             clearInterval(this.keepAliveConfig.keepAliveInterval);
@@ -184,13 +187,13 @@ class WebsocketWrapper {
         });
 
         this.websocket.addEventListener('error', (event) => {
-            const errorEvent: CustomEvent = new CustomEvent('error', { detail: event });
+            const errorEvent = new CustomEvent<EventMap["error"]>('error', { detail: event });
             eventListenerElement.dispatchEvent(errorEvent);
         });
 
         this.websocket.addEventListener('message', ({ data }) => {
-            const message = JSON.parse(data);
-            const dynamicMessageEvent: CustomEvent = new CustomEvent(message.action, { detail: message.data });
+            const message = JSON.parse(data) as IncomingMessage<keyof EventMap>;
+            const dynamicMessageEvent = new CustomEvent<EventMap["message"]>(message.action, { detail: message.data });
             eventListenerElement.dispatchEvent(dynamicMessageEvent);
         });
     }
@@ -221,7 +224,7 @@ class WebsocketWrapper {
         for (let i = 0; i < numberOfListeners; i++) {
             const listener = allListeners.next().value;
             if (listener) {
-                eventListenerElement.removeEventListener(listener[1].action, listener[1].callback)
+                eventListenerElement.removeEventListener(listener[1].action, listener[1].callbackHandler)
             }
         }
     }
@@ -264,26 +267,32 @@ class WebsocketWrapper {
         this.websocket.send(JSON.stringify(message));
     }
 
-    addListener<TKey extends keyof EventMap>(action: TKey, callback: (data: EventMap[TKey]) => void) {
+    addListener<TKey extends keyof EventMap>(action: TKey, callback: (data: EventMap[TKey]) => void, options?: AddEventListenerOptions ) {
         const { eventListenerElement, listenerRegistry } = this.listenerConfig;
 
-        eventListenerElement.addEventListener<EventMap[TKey]>(action, callback);
+        const callbackHandler: EventListenerObject = {
+            handleEvent: (e: CustomEvent<EventMap[TKey]>) => {
+               callback(e.detail)
+            }
+        } 
+
+        eventListenerElement.addEventListener(action, callbackHandler, options);
 
         const listenerID = `listener-${Math.random().toString(36).slice(2)}`;
 
-        listenerRegistry.set<TKey>(listenerID, { action, callback });
+        listenerRegistry.set<TKey>(listenerID, { action, callbackHandler });
 
         return listenerID;
     }
 
-    removeListener<TKey extends keyof EventMap>(listenerID: string) {
+    removeListener<TKey extends keyof EventMap>(listenerID: string, options?: EventListenerOptions) {
         const { eventListenerElement, listenerRegistry } = this.listenerConfig;
 
-        const { action, callback } = listenerRegistry.get<TKey>(listenerID) || {};
+        const { action, callbackHandler } = listenerRegistry.get<TKey>(listenerID) || {};
 
-        if (!action || !callback) return false;
+        if (!action || !callbackHandler) return false;
 
-        eventListenerElement.removeEventListener(action, callback);
+        eventListenerElement.removeEventListener(action, callbackHandler, options);
 
         return listenerRegistry.delete(listenerID);
     }
