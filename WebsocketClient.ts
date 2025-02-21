@@ -14,9 +14,9 @@ type EventMap = {
 
 // Types consumed by EventListenerElement
 type EventListenerSchema = {
-    addEventListener(action: string, callback: EventListenerObject, options?: AddEventListenerOptions): void;
-    removeEventListener(action: string, callback: EventListenerObject, options?: EventListenerOptions): void;
-    dispatchEvent(event: Event): void;
+    addEventListener: (action: string, callback: EventListenerObject, options?: AddEventListenerOptions) => void;
+    removeEventListener: (action: string, callback: EventListenerObject, options?: EventListenerOptions) => void;
+    dispatchEvent: (event: Event) => void;
 }
 
 // Class that handles adding & removing of event listeners and dispatching of events on a customWebSocket HTML element
@@ -42,10 +42,10 @@ class EventListenerElement implements EventListenerSchema {
 
 // Types consumed by ListenerRegistry
 type ListenerRegistrySchema = {
-    set<TKey extends keyof EventMap>(listenerID: string, listener: Listener<TKey>): void;
-    get<TKey extends keyof EventMap>(listenerID: string): Listener<TKey> | undefined;
-    delete(listenerID: string): boolean;
-    getListenersAndLength(): readonly [MapIterator<[string, Listener<keyof EventMap>]>, number];
+    set: <TKey extends keyof EventMap>(listenerID: string, listener: Listener<TKey>) => void;
+    get: <TKey extends keyof EventMap>(listenerID: string) => Listener<TKey> | undefined;
+    delete: (listenerID: string) => boolean;
+    getListenersAndLength: () => readonly [MapIterator<[string, Listener<keyof EventMap>]>, number];
 }
 type Listener<TKey extends keyof EventMap> = {
     action: TKey;
